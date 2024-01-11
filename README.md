@@ -28,15 +28,51 @@ ERC-4626 표준은 디파이 생태계에서 자산 관리를 더 효율적이�
 
 ### deposit
 
+사용자가 자산을 컨트랙트에 예치하고, 그에 상응하는 쉐어 토큰을 반환하는 역할을 합니다. 이 함수는 사용자가 언더라잉(원래의 자산)을 컨트랙트에 예치하고, 대신에 쉐어 토큰을 받아올 수 있는 메커니즘을 제공합니다. 이것은 사용자가 언더라잉 자산을 쉐어 토큰으로 교환하는 과정을 나타냅니다.
+
 ```solidity
 function deposit(uint256 assets, address receiver)
 external
 returns (uint256 shares);
 ```
 
-> 사용자가 자산을 컨트랙트에 예치하고, 그에 상응하는 쉐어 토큰을 반환하는 역할을 합니다. 이 함수는 사용자가 언더라잉(원래의 자산)을 컨트랙트에 예치하고, 대신에 쉐어 토큰을 받아올 수 있는 메커니즘을 제공합니다. 이것은 사용자가 언더라잉 자산을 쉐어 토큰으로 교환하는 과정을 나타냅니다.
+```
+/** @dev See {IERC4626-deposit}. */
+function deposit(uint256 assets, address receiver) public virtual override returns (uint256) {
+    require(assets <= maxDeposit(receiver), "ERC4626: deposit more than max");
+
+    uint256 shares = previewDeposit(assets);
+    _deposit(_msgSender(), receiver, assets, shares);
+
+    return shares;
+}
+
+/**
+  * @dev Deposit/mint common workflow.
+  */
+function _deposit(
+    address caller,
+    address receiver,
+    uint256 assets,
+    uint256 shares
+) internal virtual {
+    // If _asset is ERC777, `transferFrom` can trigger a reenterancy BEFORE the transfer happens through the
+    // `tokensToSend` hook. On the other hand, the `tokenReceived` hook, that is triggered after the transfer,
+    // calls the vault, which is assumed not malicious.
+    //
+    // Conclusion: we need to do the transfer before we mint so that any reentrancy would happen before the
+    // assets are transferred and before the shares are minted, which is a valid state.
+    // slither-disable-next-line reentrancy-no-eth
+    SafeERC20.safeTransferFrom(_asset, caller, address(this), assets);
+    _mint(receiver, shares);
+
+    emit Deposit(caller, receiver, assets, shares);
+}
+```
 
 ### mint
+
+사용자가 쉐어 토큰을 컨트랙트에 제출하면, 컨트랙트는 그에 상응하는 언더라잉 토큰을 반환하고, 쉐어 토큰은 소각되는 역할을 합니다. 이 함수는 쉐어 토큰을 사용하여 언더라잉 토큰을 획득하는 과정을 나타냅니다.
 
 ```solidity
 function mint(uint256 shares, address receiver)
@@ -44,9 +80,25 @@ external
 returns (uint256 assets);
 ```
 
-> 사용자가 쉐어 토큰을 컨트랙트에 제출하면, 컨트랙트는 그에 상응하는 언더라잉 토큰을 반환하고, 쉐어 토큰은 소각되는 역할을 합니다. 이 함수는 쉐어 토큰을 사용하여 언더라잉 토큰을 획득하는 과정을 나타냅니다.
+```
+/** @dev See {IERC4626-mint}.
+  *
+  * As opposed to {deposit}, minting is allowed even if the vault is in a state where the price of a share is zero.
+  * In this case, the shares will be minted without requiring any assets to be deposited.
+  */
+function mint(uint256 shares, address receiver) public virtual override returns (uint256) {
+    require(shares <= maxMint(receiver), "ERC4626: mint more than max");
+
+    uint256 assets = previewMint(shares);
+    _deposit(_msgSender(), receiver, assets, shares);
+
+    return assets;
+}
+```
 
 ### redeem
+
+디포짓 했던 자산을 다시 받아오는 행위, 사용자가 4626 컨트랙트에 보유한 쉐어 토큰을 반환하여 그에 상응하는 언더라잉 토큰을 회수하는 역할을 합니다. 이 함수는 사용자가 쉐어 토큰을 언더라잉 토큰으로 교환하고, 이를 컨트랙트로부터 받아오는 과정을 나타냅니다. 쉐어 토큰은 이 과정에서 소각됩니다. redeem 함수는 이 과정을 처리하며, 내부적으로는 withdraw 함수를 호출하여 언더라잉 자산을 사용자에게 반환합니다.
 
 ```solidity
 function redeem(
@@ -56,9 +108,25 @@ function redeem(
 ) external returns (uint256 assets);
 ```
 
-> 디포짓 했던 자산을 다시 받아오는 행위, 사용자가 4626 컨트랙트에 보유한 쉐어 토큰을 반환하여 그에 상응하는 언더라잉 토큰을 회수하는 역할을 합니다. 이 함수는 사용자가 쉐어 토큰을 언더라잉 토큰으로 교환하고, 이를 컨트랙트로부터 받아오는 과정을 나타냅니다. 쉐어 토큰은 이 과정에서 소각됩니다. redeem 함수는 이 과정을 처리하며, 내부적으로는 withdraw 함수를 호출하여 언더라잉 자산을 사용자에게 반환합니다.
+```
+/** @dev See {IERC4626-redeem}. */
+function redeem(
+    uint256 shares,
+    address receiver,
+    address owner
+) public virtual override returns (uint256) {
+    require(shares <= maxRedeem(owner), "ERC4626: redeem more than max");
+
+    uint256 assets = previewRedeem(shares);
+    _withdraw(_msgSender(), receiver, owner, assets, shares);
+
+    return assets;
+}
+```
 
 ### withdraw
+
+사용자가 컨트랙트에서 특정 양의 자산을 인출하고자 할 때 사용됩니다. 이 함수는 쉐어 토큰을 컨트랙트로 제출하여 그에 상응하는 언더라잉 토큰을 받아오는 역할을 합니다. 이 함수는 예치한 자산에서 발생한 이자를 포함한 총액을 인출할 때 사용될 수 있으며, 이자와 원금을 분리하지 않고 한꺼번에 인출할 수 있습니다. withdraw는 redeem 함수에 의해 내부적으로 호출될 수 있습니다.
 
 ```solidity
 function withdraw(
@@ -68,7 +136,50 @@ function withdraw(
 ) external returns (uint256 shares);
 ```
 
-> 사용자가 컨트랙트에서 특정 양의 자산을 인출하고자 할 때 사용됩니다. 이 함수는 쉐어 토큰을 컨트랙트로 제출하여 그에 상응하는 언더라잉 토큰을 받아오는 역할을 합니다. 이 함수는 예치한 자산에서 발생한 이자를 포함한 총액을 인출할 때 사용될 수 있으며, 이자와 원금을 분리하지 않고 한꺼번에 인출할 수 있습니다. withdraw는 redeem 함수에 의해 내부적으로 호출될 수 있습니다.
+```solidity
+/** @dev See {IERC4626-withdraw}. */
+function withdraw(
+    uint256 assets,
+    address receiver,
+    address owner
+) public virtual override returns (uint256) {
+    require(assets <= maxWithdraw(owner), "ERC4626: withdraw more than max");
+
+    uint256 shares = previewWithdraw(assets);
+    _withdraw(_msgSender(), receiver, owner, assets, shares);
+
+    return shares;
+}
+
+/**
+  * @dev Withdraw/redeem common workflow.
+  */
+function _withdraw(
+    address caller,
+    address receiver,
+    address owner,
+    uint256 assets,
+    uint256 shares
+) internal virtual {
+    if (caller != owner) {
+        _spendAllowance(owner, caller, shares);
+    }
+
+    // If _asset is ERC777, `transfer` can trigger a reentrancy AFTER the transfer happens through the
+    // `tokensReceived` hook. On the other hand, the `tokensToSend` hook, that is triggered before the transfer,
+    // calls the vault, which is assumed not malicious.
+    //
+    // Conclusion: we need to do the transfer after the burn so that any reentrancy would happen after the
+    // shares are burned and after the assets are transferred, which is a valid state.
+    _burn(owner, shares);
+    SafeERC20.safeTransfer(_asset, receiver, assets);
+
+    emit Withdraw(caller, receiver, owner, assets, shares);
+}
+```
+
+> deposit()과 mint()는 예치를 언더라잉 토큰을 사용하느냐 쉐어 토큰을 사용하느냐의 차이,
+> withraw()와 redeem() 또한 어떤 토큰을 상환 받을것인가의 차이로 정리.
 
 <br><br>
 
